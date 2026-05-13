@@ -1,0 +1,167 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+@keyframes opening-plane-cross {
+  0% {
+    transform: translateX(-15vw) translateY(10px) rotate(-4deg);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(140vw) translateY(-14px) rotate(3deg);
+    opacity: 0;
+  }
+}
+
+@keyframes earth-slow-pan {
+  0% {
+    transform: scale(1.08) translateX(-1.5%);
+  }
+  50% {
+    transform: scale(1.13) translateX(1.5%);
+  }
+  100% {
+    transform: scale(1.08) translateX(-1.5%);
+  }
+}
+
+@keyframes earth-surface-drift {
+  0%,
+  100% {
+    transform: translateX(-8px) translateY(0);
+  }
+  50% {
+    transform: translateX(10px) translateY(-3px);
+  }
+}
+
+@keyframes intro-loader-plane {
+  0% {
+    transform: translateX(-56vw) translateY(26px) scale(0.72) rotate(-8deg);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  58% {
+    transform: translateX(0) translateY(-8px) scale(1.18) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(62vw) translateY(-44px) scale(0.78) rotate(8deg);
+    opacity: 0;
+  }
+}
+
+@keyframes intro-loader-trail {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scaleX(0.65);
+  }
+  45%,
+  65% {
+    opacity: 1;
+    transform: scaleX(1.1);
+  }
+}
+
+@keyframes flyAcross {
+  0% {
+    left: -12%;
+    top: 52%;
+    transform: rotate(9deg) scale(0.92);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  76% {
+    opacity: 1;
+  }
+  100% {
+    left: 112%;
+    top: 22%;
+    transform: rotate(-12deg) scale(1.18);
+    opacity: 0;
+  }
+}
+
+@keyframes flyTrail {
+  0% {
+    left: -36%;
+    top: calc(52% + 28px);
+    opacity: 0;
+    transform: scaleX(0.45) rotate(9deg);
+  }
+  18%,
+  72% {
+    opacity: 0.85;
+    transform: scaleX(1) rotate(1deg);
+  }
+  100% {
+    left: 82%;
+    top: calc(22% + 36px);
+    opacity: 0;
+    transform: scaleX(0.7) rotate(-12deg);
+  }
+}
+
+.opening-plane-flight {
+  animation: opening-plane-cross 7.5s ease-in-out infinite;
+}
+
+.earth-slow-pan {
+  animation: earth-slow-pan 18s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.earth-surface-drift {
+  animation: earth-surface-drift 18s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.intro-loader-plane {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  animation: intro-loader-plane 3.1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.intro-loader-trail {
+  width: min(38vw, 420px);
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.45), rgba(255, 255, 255, 0.95));
+  box-shadow: 0 0 30px rgba(103, 232, 249, 0.8);
+  transform-origin: right;
+  animation: intro-loader-trail 3.1s ease-in-out forwards;
+}
+
+.intro-plane {
+  animation: flyAcross 2.2s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+
+.intro-plane-trail {
+  width: min(42vw, 520px);
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.42), rgba(255, 255, 255, 0.96));
+  box-shadow: 0 0 30px rgba(103, 232, 249, 0.8);
+  transform-origin: right;
+  animation: flyTrail 2.2s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+
+button[role="radio"][value="card"] {
+  display: none;
+}
