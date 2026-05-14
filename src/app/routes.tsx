@@ -3,6 +3,8 @@ import Home from "./pages/Home";
 import FlightResults from "./pages/FlightResults";
 import Booking from "./pages/Booking";
 import MyTickets from "./pages/MyTickets";
+import PaymentSuccess from "./pages/PaymentSuccess";
+import PaymentCancel from "./pages/PaymentCancel";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -41,6 +43,22 @@ export const router = createBrowserRouter([
     element: (
       <ProtectedRoute>
         <Booking />
+      </ProtectedRoute>
+    ),
+  },
+  {
+    path: "/payment/success",
+    element: (
+      <ProtectedRoute>
+        <PaymentSuccess />
+      </ProtectedRoute>
+    ),
+  },
+  {
+    path: "/payment/cancel",
+    element: (
+      <ProtectedRoute>
+        <PaymentCancel />
       </ProtectedRoute>
     ),
   },

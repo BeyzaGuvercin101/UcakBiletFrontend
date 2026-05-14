@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
 import Layout from '../components/Layout';
 import { Button } from '../components/ui/Button';
@@ -7,11 +7,11 @@ import { Progress } from '../components/ui/progress';
 import * as RadioGroup from '@radix-ui/react-radio-group';
 import * as Select from '@radix-ui/react-select';
 import * as Checkbox from '@radix-ui/react-checkbox';
-import { Plane, CreditCard, User, Mail, Phone, CheckCircle, Armchair, Briefcase, Star, ChevronDown, Check, IdCard, Monitor, AlertTriangle, ShieldCheck, ExternalLink } from 'lucide-react';
+import { Plane, CreditCard, User, Mail, Phone, CheckCircle, Armchair, Briefcase, Star, ChevronDown, Check, IdCard, Monitor, AlertTriangle, ShieldCheck, ExternalLink, Headphones } from 'lucide-react';
 import { toast } from 'sonner';
 import { AirlineLogo } from '../utils/airlineLogos';
-import { FlightDto, flightService } from '../services/flightService';
-import { paymentService } from '../services/paymentService';
+import { FlightDto, SeatDto, flightService } from '../services/flightService';
+import { paymentService, type CheckoutSessionDto } from '../services/paymentService';
 
 // Countries that require visa for Turkish citizens
 const visaRequiredCountries = [
@@ -117,9 +117,21 @@ interface PassengerInfo {
   firstName: string;
   lastName: string;
   identityNumber: string;
+  passportNumber?: string;
+  gender?: string;
+  email?: string;
+  phoneNumber?: string;
 }
 
-const extractCity = (location: string) => location.split(' (')[0];
+const extractCity = (location: string | { city?: string; airport?: string } | unknown) => {
+  if (typeof location === 'string') {
+    return location.split(' (')[0];
+  }
+  if (location && typeof location === 'object' && 'city' in location) {
+    return (location as { city?: string }).city || '';
+  }
+  return '';
+};
 
 const isTurkeyLocation = (location: string) => {
   const normalizedLocation = extractCity(location).toLocaleLowerCase('tr-TR');
@@ -128,6 +140,30 @@ const isTurkeyLocation = (location: string) => {
 
 const isTurkeyDomesticFlight = (from: string, to: string) => {
   return isTurkeyLocation(from) && isTurkeyLocation(to);
+};
+
+const getFlightClassSurcharge = (flightClass: string): number => {
+  const classMap: Record<string, number> = {
+    economy: 0,
+    business: 2625,
+    first: 5250,
+  };
+  return classMap[flightClass] || 0;
+};
+
+const getPassengerTypeMultiplier = (passengerType: PassengerType): number => {
+  const multiplierMap: Record<PassengerType, number> = {
+    adult: 1,
+    child: 0.5,
+    student: 0.8,
+  };
+  return multiplierMap[passengerType];
+};
+
+const calculatePassengerPrice = (basePrice: number, flightClass: string, passengerType: PassengerType): number => {
+  const surcharge = getFlightClassSurcharge(flightClass);
+  const multiplier = getPassengerTypeMultiplier(passengerType);
+  return Math.round((basePrice + surcharge) * multiplier);
 };
 
 const onlyDigits = (value: string, maxLength?: number) => {
@@ -148,6 +184,10 @@ const createPassengerList = (adultCount: number, childCount: number, studentCoun
         firstName: '',
         lastName: '',
         identityNumber: '',
+        passportNumber: '',
+        gender: '',
+        email: '',
+        phoneNumber: '',
       });
     }
   };
@@ -185,10 +225,18 @@ const formatDate = (dateTime: string) => {
   return date.toISOString().slice(0, 10);
 };
 
+const getLocationDisplay = (location: string | { city: string; airport: string } | unknown): string => {
+  if (typeof location === 'string') return location;
+  if (location && typeof location === 'object' && 'city' in location) {
+    return (location as { city: string }).city;
+  }
+  return '';
+};
+
 const mapBackendFlight = (flight: FlightDto) => ({
   airline: flight.airline,
-  from: flight.departure,
-  to: flight.arrival,
+  from: getLocationDisplay(flight.departure),
+  to: getLocationDisplay(flight.arrival),
   departTime: formatTime(flight.departureTime),
   arriveTime: formatTime(flight.arrivalTime),
   duration: 'Direkt',
@@ -206,6 +254,14 @@ const getStoredChatFlight = (flightId?: string) => {
   } catch {
     return null;
   }
+};
+
+const extractReservationId = (payload: unknown): number | null => {
+  if (payload && typeof payload === 'object' && 'id' in payload) {
+    const n = Number((payload as { id: unknown }).id);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 };
 
 const mockFlightData: Record<string, any> = {
@@ -303,15 +359,44 @@ export default function Booking() {
     createPassengerList(adultPassengers, childPassengers, studentPassengers)
   );
 
-  const [selectedClass, setSelectedClass] = useState('economy');
+  const [selectedClass, setSelectedClass] = useState(() => {
+    const classFromUrl = searchParams.get('flightClass');
+    return classFromUrl || 'economy';
+  });
   const [selectedSeat, setSelectedSeat] = useState('');
+  const [apiSeats, setApiSeats] = useState<SeatDto[]>([]);
+  const [hasSeatResponse, setHasSeatResponse] = useState(false);
+  const [isLoadingSeats, setIsLoadingSeats] = useState(false);
+  const [seatLoadError, setSeatLoadError] = useState<string | null>(null);
   const [selectedBaggage, setSelectedBaggage] = useState('none');
+  const [selectedWifi, setSelectedWifi] = useState('none');
   const [selectedEntertainment, setSelectedEntertainment] = useState('none');
   const [visaConfirmed, setVisaConfirmed] = useState(false);
   const [phoneCountryCode, setPhoneCountryCode] = useState('+90');
   const [bookingStep, setBookingStep] = useState<'extras' | 'passenger' | 'payment'>('extras');
   const [paymentMethod] = useState<'stripe' | 'card'>('stripe');
   const [paymentCountry, setPaymentCountry] = useState('Türkiye');
+  const [isSavingReservation, setIsSavingReservation] = useState(false);
+  const [checkoutReservationId, setCheckoutReservationId] = useState<number | null>(null);
+
+  useEffect(() => {
+    setCheckoutReservationId(null);
+  }, [flightId]);
+
+  const calculateTotalPrice = () => {
+    if (!flight) return 0;
+    let total = 0;
+    passengerInfos.forEach((passenger) => {
+      const price = calculatePassengerPrice(flight.price, selectedClass, passenger.type);
+      total += price;
+      if (returnFlight) {
+        const returnPrice = calculatePassengerPrice(returnFlight.price, selectedClass, passenger.type);
+        total += returnPrice;
+      }
+    });
+    return total;
+  };
+  const totalPrice = calculateTotalPrice();
 
   const renderPaymentCountrySelect = () => (
     <div className="mb-4">
@@ -365,25 +450,58 @@ export default function Booking() {
     });
   }, [adultPassengers, childPassengers, studentPassengers]);
 
+  const fetchSeatsForFlight = useCallback(() => {
+    if (!flightId) return;
+
+    const classMap: Record<string, string> = {
+      economy: 'ECONOMY',
+      business: 'BUSINESS',
+      first: 'FIRST_CLASS',
+    };
+
+    setSelectedSeat('');
+    setSeatLoadError(null);
+    setIsLoadingSeats(true);
+    setHasSeatResponse(false);
+    flightService.getSeatsByFlight(flightId, 'AVAILABLE', classMap[selectedClass])
+      .then((response) => {
+        const seatsData = response.data || response.payload || [];
+        setApiSeats(Array.isArray(seatsData) ? seatsData : []);
+        setHasSeatResponse(true);
+      })
+      .catch(() => {
+        setApiSeats([]);
+        setHasSeatResponse(true);
+        setSeatLoadError('Koltuklar yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.');
+      })
+      .finally(() => {
+        setIsLoadingSeats(false);
+      });
+  }, [flightId, selectedClass]);
+
+  useEffect(() => {
+    fetchSeatsForFlight();
+  }, [fetchSeatsForFlight]);
+
   const classOptions = [
     {
       id: 'economy',
       label: 'Economy Class',
-      priceMultiplier: 1,
+      surcharge: 0,
       description: 'Standart konfor',
       features: ['Standart koltuk', 'İkram servisi', '20kg bagaj hakkı']
     },
     {
       id: 'business',
       label: 'Business Class',
-      priceMultiplier: 2.5,
+      surcharge: 2625,
       description: 'Premium deneyim',
       features: ['Geniş koltuk', 'Özel menü', '30kg bagaj hakkı', 'Lounge erişimi']
     },
     {
       id: 'first',
       label: 'First Class',
-      priceMultiplier: 4,
+      surcharge: 5250,
       description: 'Lüks seyahat',
       features: ['Yatay koltuk', 'Şef menüsü', '40kg bagaj hakkı', 'VIP lounge', 'Limuzin servisi']
     },
@@ -391,25 +509,18 @@ export default function Booking() {
 
   const getSeatMapByClass = () => {
     if (selectedClass === 'economy') {
+      // Economy: rows 8-27 (20 sıra), columns A-F (6 koltuk) = 120 toplam
       return {
-        rows: [
-          { number: 8, isExtraLegroom: true, price: 150 },
-          { number: 9, isExtraLegroom: true, price: 150 },
-          { number: 10, isExtraLegroom: true, price: 150 },
-          { number: 15, isExtraLegroom: false, price: 0 },
-          { number: 16, isExtraLegroom: false, price: 0 },
-          { number: 17, isExtraLegroom: false, price: 0 },
-          { number: 20, isExtraLegroom: false, price: 0 },
-          { number: 21, isExtraLegroom: false, price: 0 },
-          { number: 22, isExtraLegroom: false, price: 0 },
-          { number: 25, isExtraLegroom: false, price: 0 },
-          { number: 26, isExtraLegroom: false, price: 0 },
-          { number: 27, isExtraLegroom: false, price: 0 },
-        ],
+        rows: Array.from({ length: 20 }, (_, i) => ({
+          number: 8 + i,
+          isExtraLegroom: i < 3, // rows 8-10: extra legroom
+          price: i < 3 ? 150 : 0,
+        })),
         columns: ['A', 'B', 'C', '', 'D', 'E', 'F'],
         occupiedSeats: ['15B', '16A', '17D', '20C', '21E', '25A', '26F'],
       };
     } else if (selectedClass === 'business') {
+      // Business: rows 3-7 (5 sıra), columns A-D (4 koltuk) = 20 toplam
       return {
         rows: [
           { number: 3, isExtraLegroom: false, price: 0 },
@@ -417,82 +528,112 @@ export default function Booking() {
           { number: 5, isExtraLegroom: false, price: 0 },
           { number: 6, isExtraLegroom: false, price: 0 },
           { number: 7, isExtraLegroom: false, price: 0 },
-          { number: 8, isExtraLegroom: false, price: 0 },
-          { number: 9, isExtraLegroom: false, price: 0 },
-          { number: 10, isExtraLegroom: false, price: 0 },
-          { number: 11, isExtraLegroom: false, price: 0 },
-          { number: 12, isExtraLegroom: false, price: 0 },
         ],
-        columns: ['A', 'C', '', 'D', 'F'],
-        occupiedSeats: ['3A', '4D', '5C', '7F', '9A', '10D'],
+        columns: ['A', 'B', 'C', '', 'D'],
+        occupiedSeats: ['3A', '4D', '5C', '7B'],
       };
     } else {
+      // First Class: rows 1-2 (2 sıra), columns A-B (2 koltuk) = 4 toplam
       return {
         rows: [
           { number: 1, isExtraLegroom: false, price: 0 },
           { number: 2, isExtraLegroom: false, price: 0 },
-          { number: 3, isExtraLegroom: false, price: 0 },
-          { number: 4, isExtraLegroom: false, price: 0 },
-          { number: 5, isExtraLegroom: false, price: 0 },
         ],
-        columns: ['A', 'C', '', 'D', 'F'],
-        occupiedSeats: ['1A', '2F', '4C'],
+        columns: ['A', 'B'],
+        occupiedSeats: ['1A'],
       };
     }
   };
 
   const seatMap = getSeatMapByClass();
+  const selectableApiSeats = useMemo(
+    () => apiSeats.filter((seat) => String(seat.status).toUpperCase() === 'AVAILABLE'),
+    [apiSeats],
+  );
+  const apiSeatByNumber = useMemo(
+    () => new Map(selectableApiSeats.map((seat) => [seat.seatNumber.trim().toUpperCase(), seat])),
+    [selectableApiSeats],
+  );
+  const selectedSeatData = apiSeats.find((seat) => String(seat.id) === selectedSeat);
+  const selectedSeatNumber = selectedSeatData?.seatNumber || selectedSeat;
+  const selectedSeatIdNum = selectedSeat ? Number(selectedSeat) : 0;
+  const hasValidSeatForReservation = Boolean(selectedSeatData && selectedSeatIdNum > 0);
 
   const baggageOptions = [
     { id: 'none', label: 'Sadece El Bagajı (8kg)', price: 0, description: 'Ücretsiz' },
-    { id: '20kg', label: '20 kg Bagaj', price: 250, description: 'Standart bagaj hakkı' },
-    { id: '30kg', label: '30 kg Bagaj', price: 450, description: 'Ekstra bagaj hakkı' },
-    { id: '40kg', label: '40 kg Bagaj', price: 650, description: 'Maksimum bagaj hakkı' },
+    { id: 'KG_20', label: '20 kg Bagaj', price: 250, description: 'Standart bagaj hakkı' },
+    { id: 'KG_30', label: '30 kg Bagaj', price: 450, description: 'Ekstra bagaj hakkı' },
+    { id: 'KG_40', label: '40 kg Bagaj', price: 650, description: 'Maksimum bagaj hakkı' },
+  ];
+
+  const wifiOptions = [
+    { id: 'none', label: 'WiFi İstemiyorum', price: 0, description: 'Ücretsiz' },
+    { id: 'BASIC', label: 'Temel WiFi', price: 150, description: 'Mesajlaşma ve hafif browsing' },
+    { id: 'PREMIUM', label: 'Premium WiFi', price: 300, description: 'Tüm internet hizmetleri' },
   ];
 
   const entertainmentOptions = [
     { id: 'none', label: 'Eğlence Paketi İstemiyorum', price: 0, description: 'Ücretsiz' },
-    { id: 'basic', label: 'Temel Eğlence + WiFi', price: 180, description: 'Film, müzik ve mesajlaşma WiFi paketi' },
-    { id: 'premium', label: 'Premium Eğlence + Hızlı WiFi', price: 320, description: 'Tüm içerikler, oyunlar ve hızlı internet' },
+    { id: 'BASIC', label: 'Temel Eğlence', price: 100, description: 'Film ve müzik kataloglarından seçim' },
+    { id: 'PREMIUM', label: 'Premium Eğlence', price: 200, description: 'Tüm içerikler, oyunlar ve uygulamalar' },
   ];
 
   const getClassPrice = () => {
-    const classOption = classOptions.find(c => c.id === selectedClass);
-    return classOption ? Math.round(itineraryBasePrice * passengerFareMultiplier * (classOption.priceMultiplier - 1)) : 0;
+    // Class surcharge is now calculated per-passenger in calculatePassengerPrice
+    return 0; // Surcharge already included in base price
   };
 
-  const getBaseFarePrice = () => Math.round(itineraryBasePrice * passengerFareMultiplier);
+  const getBaseFarePrice = () => totalPrice;
 
-  const getPassengerTypeFare = (count: number, multiplier: number) => Math.round(itineraryBasePrice * count * multiplier);
+  const getPassengerTypeFare = (count: number, multiplier: number) => {
+    if (!flight) return 0;
+    let fare = 0;
+    for (let i = 0; i < count; i++) {
+      const typeMultiplier = multiplier;
+      const singleFare = Math.round((flight.price + getFlightClassSurcharge(selectedClass)) * typeMultiplier);
+      fare += singleFare;
+      if (returnFlight) {
+        fare += Math.round((returnFlight.price + getFlightClassSurcharge(selectedClass)) * typeMultiplier);
+      }
+    }
+    return fare;
+  };
 
-  const getExtrasSubtotal = () => getSeatPrice() + getBaggagePrice() + getEntertainmentPrice();
+  const getExtrasSubtotal = () => getSeatPrice() + getBaggagePrice() + getWifiPrice() + getEntertainmentPrice();
 
   const getFareSubtotal = () => getBaseFarePrice() + getClassPrice() + getExtrasSubtotal();
 
-  const getTaxPrice = () => Math.round(getFareSubtotal() * 0.18);
-
-  const getTotalPrice = () => getFareSubtotal() + 150 + getTaxPrice();
+  const getTotalPrice = () => getFareSubtotal();
 
   const getSeatPrice = () => {
     if (!selectedSeat) return 0;
-    const rowNumber = parseInt(selectedSeat.match(/\d+/)?.[0] || '0');
+    if (selectedSeatData?.price) return selectedSeatData.price;
+    const rowNumber = parseInt(selectedSeatNumber.match(/\d+/)?.[0] || '0');
     const row = seatMap.rows.find(r => r.number === rowNumber);
     return row ? row.price : 0;
   };
 
   const getBaggagePrice = () => {
+    if (selectedBaggage === 'none' || selectedBaggage === null) return 0;
     const baggage = baggageOptions.find(b => b.id === selectedBaggage);
     return baggage ? baggage.price : 0;
   };
 
+  const getWifiPrice = () => {
+    if (selectedWifi === 'none' || selectedWifi === null) return 0;
+    const wifi = wifiOptions.find(w => w.id === selectedWifi);
+    return wifi ? wifi.price : 0;
+  };
+
   const getEntertainmentPrice = () => {
+    if (selectedEntertainment === 'none' || selectedEntertainment === null) return 0;
     const entertainment = entertainmentOptions.find(e => e.id === selectedEntertainment);
     return entertainment ? entertainment.price : 0;
   };
 
   const goToPassengerStep = () => {
-    if (!selectedSeat) {
-      toast.error('Lütfen bir koltuk seçin');
+    if (!hasValidSeatForReservation) {
+      toast.error('Lütfen müsait bir koltuk seçin (koltuk listesi API üzerinden yüklenmeli).');
       return;
     }
 
@@ -500,7 +641,86 @@ export default function Booking() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const goToPaymentStep = () => {
+  const persistReservationsToBackend = async (): Promise<number> => {
+    const flightClassMap: Record<string, string> = {
+      economy: 'ECONOMY',
+      business: 'BUSINESS',
+      first: 'FIRST_CLASS',
+    };
+    const passengerTypeMap: Record<PassengerType, string> = {
+      adult: 'ADULT',
+      child: 'CHILD',
+      student: 'STUDENT',
+    };
+    const baggageMap: Record<string, string> = {
+      none: 'CABIN_ONLY',
+      KG_20: 'KG_20',
+      KG_30: 'KG_30',
+      KG_40: 'KG_40',
+    };
+    const wifiMap: Record<string, string> = {
+      none: 'NONE',
+      BASIC: 'BASIC',
+      PREMIUM: 'PREMIUM',
+    };
+    const entertainmentMap: Record<string, string> = {
+      none: 'NONE',
+      BASIC: 'BASIC',
+      PREMIUM: 'PREMIUM',
+    };
+
+    const fid = flightId ? Number(flightId) : 0;
+    if (!fid) {
+      throw new Error('Geçersiz uçuş');
+    }
+    if (!hasValidSeatForReservation) {
+      throw new Error('Geçersiz koltuk');
+    }
+
+    const email = formData.email.trim();
+    const phoneNumber = `${phoneCountryCode}${formData.phone}`.replace(/\s/g, '');
+
+    let primaryCheckoutId: number | null = null;
+
+    for (const passenger of passengerInfos) {
+      const firstName = passenger.firstName.trim();
+      const lastName = passenger.lastName.trim();
+      const identityNumber = passenger.identityNumber.trim();
+      const passportNumber = (passenger.passportNumber || '').trim() || identityNumber;
+
+      const body = {
+        flightId: fid,
+        seatId: selectedSeatIdNum,
+        userId: 0,
+        flightClass: flightClassMap[selectedClass] || 'ECONOMY',
+        passengerType: passengerTypeMap[passenger.type] || 'ADULT',
+        baggageOption: baggageMap[selectedBaggage] || 'CABIN_ONLY',
+        wifiOption: wifiMap[selectedWifi] || 'NONE',
+        entertainmentOption: entertainmentMap[selectedEntertainment] || 'NONE',
+        firstName,
+        lastName,
+        identityNumber,
+        passportNumber,
+        email,
+        phoneNumber,
+      };
+
+      const response = await flightService.saveReservation(body);
+      const saved = response.data ?? response.payload;
+      const rid = extractReservationId(saved);
+      if (rid !== null && primaryCheckoutId === null) {
+        primaryCheckoutId = rid;
+      }
+    }
+
+    if (!primaryCheckoutId) {
+      throw new Error('Sunucu rezervasyon numarası (id) döndürmedi; ödeme için gerekli.');
+    }
+
+    return primaryCheckoutId;
+  };
+
+  const goToPaymentStep = async () => {
     if (requiresVisa(flight.to) && !visaConfirmed) {
       toast.error('Lütfen vize onayını işaretleyin');
       return;
@@ -515,56 +735,94 @@ export default function Booking() {
       return;
     }
 
-    if (!formData.email || !formData.phone) {
-      toast.error('Lütfen iletişim bilgilerini eksiksiz doldurun');
+    if (!hasValidSeatForReservation) {
+      toast.error('Lütfen müsait bir koltuk seçin');
       return;
     }
 
-    setBookingStep('payment');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const email = formData.email.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast.error('Rezervasyon kaydı için geçerli bir e-posta adresi girin');
+      return;
+    }
+
+    const phoneDigits = onlyDigits(formData.phone);
+    if (phoneDigits.length < 10) {
+      toast.error('Rezervasyon kaydı için geçerli bir telefon numarası girin (en az 10 hane)');
+      return;
+    }
+
+    setIsSavingReservation(true);
+    try {
+      const reservationId = await persistReservationsToBackend();
+      setCheckoutReservationId(reservationId);
+      setBookingStep('payment');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      toast.success('Rezervasyon kaydedildi', {
+        description: 'Ödeme adımına geçebilirsiniz.',
+      });
+    } catch (error) {
+      console.error('Reservation save error:', error);
+      const description = error instanceof Error ? error.message : 'Bilgilerinizi kontrol edip tekrar deneyin.';
+      toast.error('Rezervasyon kaydedilemedi', { description });
+    } finally {
+      setIsSavingReservation(false);
+    }
   };
 
-  const completeStripeDemoPurchase = (paymentProvider: string) => {
+  const completeStripeDemoPurchase = async (paymentProvider: string) => {
     const totalPrice = getTotalPrice();
     const primaryPassenger = passengerInfos[0];
 
-    const ticket = {
-      id: Date.now().toString(),
-      ...flight,
-      price: totalPrice,
-      tripType,
-      returnFlight,
-      passengers: {
-        adult: adultPassengers,
-        child: childPassengers,
-        student: studentPassengers,
-      },
-      passenger: primaryPassenger ? `${primaryPassenger.firstName} ${primaryPassenger.lastName}` : '',
-      passengerDetails: passengerInfos,
-      identityType: identityType === 'tc' ? 'TC Kimlik' : 'Pasaport',
-      identityNumber: primaryPassenger?.identityNumber || '',
-      email: formData.email,
-      phone: `${phoneCountryCode} ${formData.phone}`,
-      paymentProvider,
-      paymentCountry,
-      class: classOptions.find(c => c.id === selectedClass)?.label || 'Economy',
-      seat: selectedSeat,
-      baggage: baggageOptions.find(b => b.id === selectedBaggage)?.label || 'Yok',
-      entertainment: entertainmentOptions.find(e => e.id === selectedEntertainment)?.label || 'Yok',
-      pnr: `SF${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-      purchaseDate: new Date().toISOString(),
-    };
+    if (!hasValidSeatForReservation) {
+      toast.error('Lütfen müsait bir koltuk seçin');
+      return;
+    }
 
-    const existingTickets = JSON.parse(localStorage.getItem('tickets') || '[]');
-    localStorage.setItem('tickets', JSON.stringify([...existingTickets, ticket]));
+    try {
+      // Rezervasyon zaten "Ödeme Bilgilerine Geç" adımında API'ye kaydedildi; burada yalnızca yerel bilet oluşturulur.
+      const ticket = {
+        id: Date.now().toString(),
+        ...flight,
+        price: totalPrice,
+        tripType,
+        returnFlight,
+        passengers: {
+          adult: adultPassengers,
+          child: childPassengers,
+          student: studentPassengers,
+        },
+        passenger: primaryPassenger ? `${primaryPassenger.firstName} ${primaryPassenger.lastName}` : '',
+        passengerDetails: passengerInfos,
+        identityType: identityType === 'tc' ? 'TC Kimlik' : 'Pasaport',
+        identityNumber: primaryPassenger?.identityNumber || '',
+        email: formData.email,
+        phone: `${phoneCountryCode} ${formData.phone}`,
+        paymentProvider,
+        paymentCountry,
+        class: classOptions.find(c => c.id === selectedClass)?.label || 'Economy',
+        seat: selectedSeatNumber,
+        seatId: selectedSeatIdNum,
+        baggage: baggageOptions.find(b => b.id === selectedBaggage)?.label || 'Yok',
+        entertainment: entertainmentOptions.find(e => e.id === selectedEntertainment)?.label || 'Yok',
+        pnr: `SF${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+        purchaseDate: new Date().toISOString(),
+      };
 
-    toast.success('Biletiniz başarıyla satın alındı!', {
-      description: `PNR: ${ticket.pnr} - Koltuk: ${selectedSeat}`,
-    });
+      const existingTickets = JSON.parse(localStorage.getItem('tickets') || '[]');
+      localStorage.setItem('tickets', JSON.stringify([...existingTickets, ticket]));
 
-    setTimeout(() => {
-      navigate('/my-tickets');
-    }, 2000);
+      toast.success('Biletiniz başarıyla satın alındı!', {
+        description: `PNR: ${ticket.pnr} — Koltuk: ${selectedSeatNumber}`,
+      });
+
+      setTimeout(() => {
+        navigate('/my-tickets');
+      }, 2000);
+    } catch (error) {
+      console.error('Reservation error:', error);
+      toast.error('Bilet satın alma sırasında bir hata oluştu');
+    }
   };
 
   const handleStripeCheckout = async () => {
@@ -573,8 +831,8 @@ export default function Booking() {
       return;
     }
 
-    if (!selectedSeat) {
-      toast.error('Lütfen bir koltuk seçin');
+    if (!hasValidSeatForReservation) {
+      toast.error('Lütfen müsait bir koltuk seçin');
       return;
     }
 
@@ -587,28 +845,39 @@ export default function Booking() {
       return;
     }
 
-    if (formData.phone.length < 7) {
+    if (formData.phone.length > 0 && formData.phone.length < 7) {
       toast.error('Lütfen geçerli bir telefon numarası girin');
       return;
     }
 
-    try {
-      const reservationId = Number(flightId) || Date.now();
-      const response = await paymentService.checkoutPayment(reservationId);
-      const checkoutPayload = response.data || response.payload;
-      const checkoutUrl = typeof checkoutPayload === 'string'
-        ? checkoutPayload
-        : checkoutPayload?.checkoutUrl || checkoutPayload?.paymentUrl || checkoutPayload?.sessionUrl || checkoutPayload?.url;
+    if (!checkoutReservationId) {
+      toast.error('Önce rezervasyonu kaydedin', {
+        description: 'Yolcu bilgileri adımında "Ödeme bilgilerine geç" ile kayıt oluşturun.',
+      });
+      return;
+    }
 
-      if (typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http')) {
-        window.location.href = checkoutUrl;
+    try {
+      const response = await paymentService.checkoutPayment(checkoutReservationId);
+      const checkoutPayload = response.data ?? response.payload;
+
+      let sessionUrl: string | undefined;
+      if (typeof checkoutPayload === 'string' && checkoutPayload.startsWith('http')) {
+        sessionUrl = checkoutPayload;
+      } else if (checkoutPayload && typeof checkoutPayload === 'object') {
+        const p = checkoutPayload as CheckoutSessionDto & { checkoutUrl?: string; paymentUrl?: string; url?: string };
+        sessionUrl = p.sessionUrl || p.checkoutUrl || p.paymentUrl || p.url;
+      }
+
+      if (sessionUrl?.startsWith('http')) {
+        window.location.href = sessionUrl;
         return;
       }
 
-      completeStripeDemoPurchase('Stripe Checkout');
-    } catch {
-      toast.info('Stripe demo modu kullanılıyor. Backend bağlandığında gerçek checkout sayfasına yönlenecek.');
-      completeStripeDemoPurchase('Stripe Checkout Demo');
+      toast.error('Ödeme oturumu oluşturulamadı', { description: 'Sunucudan sessionUrl gelmedi.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ödeme oturumu başlatılamadı';
+      toast.error(message);
     }
   };
 
@@ -648,7 +917,7 @@ export default function Booking() {
     });
   };
 
-  const handlePassengerInfoChange = (passengerId: string, field: keyof Pick<PassengerInfo, 'firstName' | 'lastName' | 'identityNumber'>, rawValue: string) => {
+  const handlePassengerInfoChange = (passengerId: string, field: keyof Pick<PassengerInfo, 'firstName' | 'lastName' | 'identityNumber' | 'passportNumber' | 'gender' | 'email' | 'phoneNumber'>, rawValue: string) => {
     let value = rawValue;
 
     if (field === 'firstName' || field === 'lastName') {
@@ -826,11 +1095,11 @@ export default function Booking() {
                           </div>
                         </div>
                         <div className="text-right flex-shrink-0 ml-3">
-                          {classOption.priceMultiplier === 1 ? (
+                          {classOption.surcharge === 0 ? (
                             <span className="text-xs text-primary whitespace-nowrap">Standart</span>
                           ) : (
                             <span className="font-medium whitespace-nowrap">
-                              +₺{Math.round(itineraryBasePrice * passengerFareMultiplier * (classOption.priceMultiplier - 1)).toLocaleString('tr-TR')}
+                              +₺{classOption.surcharge.toLocaleString('tr-TR')}
                             </span>
                           )}
                         </div>
@@ -858,6 +1127,15 @@ export default function Booking() {
                 </div>
                 Koltuk Seçimi ({classOptions.find(c => c.id === selectedClass)?.label})
               </h3>
+
+              {seatLoadError && (
+                <div className="mb-6 flex flex-col gap-3 rounded-2xl border-2 border-destructive/30 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-sm text-destructive">{seatLoadError}</p>
+                  <Button type="button" variant="outline" className="shrink-0" onClick={() => fetchSeatsForFlight()}>
+                    Tekrar dene
+                  </Button>
+                </div>
+              )}
 
               <div className="mb-6 flex flex-wrap gap-4 text-sm">
                 <div className="flex items-center gap-2">
@@ -896,19 +1174,21 @@ export default function Booking() {
                           if (col === '') {
                             return <div key={idx} className="w-8"></div>;
                           }
-                          const seatId = `${row.number}${col}`;
-                          const isOccupied = seatMap.occupiedSeats.includes(seatId);
-                          const isSelected = selectedSeat === seatId;
+                          const seatNumber = `${row.number}${col}`;
+                          const apiSeat = apiSeatByNumber.get(seatNumber.toUpperCase());
+                          const isOccupied = hasSeatResponse ? !apiSeat : true;
+                          const seatValue = apiSeat ? String(apiSeat.id) : '';
+                          const isSelected = selectedSeat === seatValue;
                           const isExtraLegroom = row.isExtraLegroom;
 
                           return (
                             <button
-                              key={seatId}
+                              key={seatNumber}
                               type="button"
-                              onClick={() => !isOccupied && setSelectedSeat(seatId)}
-                              disabled={isOccupied}
+                              onClick={() => seatValue && setSelectedSeat(seatValue)}
+                              disabled={isLoadingSeats || isOccupied}
                               className={`w-10 h-10 rounded-lg border-2 transition-all text-xs font-medium flex items-center justify-center ${
-                                isOccupied
+                                isLoadingSeats || isOccupied
                                   ? 'bg-muted-foreground/20 border-muted-foreground/30 cursor-not-allowed'
                                   : isSelected
                                   ? 'bg-primary/10 border-primary text-primary scale-110'
@@ -930,12 +1210,17 @@ export default function Booking() {
                 {selectedSeat && (
                   <div className="mt-6 p-4 bg-primary/10 border-2 border-primary rounded-2xl text-center">
                     <div className="text-sm text-muted-foreground mb-1">Seçilen Koltuk</div>
-                    <div className="text-2xl text-primary font-medium">{selectedSeat}</div>
+                    <div className="text-2xl text-primary font-medium">{selectedSeatNumber}</div>
                     {getSeatPrice() > 0 && (
                       <div className="text-sm text-muted-foreground mt-1">
                         Ekstra ücret: +₺{getSeatPrice()}
                       </div>
                     )}
+                  </div>
+                )}
+                {!isLoadingSeats && hasSeatResponse && !seatLoadError && selectableApiSeats.length === 0 && (
+                  <div className="mt-6 p-4 bg-muted/50 border-2 border-border rounded-2xl text-center text-sm text-muted-foreground">
+                    Bu sınıf için uygun koltuk bulunamadı.
                   </div>
                 )}
               </div>
@@ -975,6 +1260,47 @@ export default function Booking() {
                       </div>
                       <div className="ml-6 text-xs text-muted-foreground line-clamp-1">
                         {baggage.description}
+                      </div>
+                    </RadioGroup.Item>
+                  </div>
+                ))}
+              </RadioGroup.Root>
+            </div>
+
+            <div className="backdrop-blur-xl bg-card/70 border border-border/50 rounded-2xl p-6">
+              <h3 className="mb-6 flex items-center gap-2 text-xl">
+                <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+                  <Headphones className="w-5 h-5 text-primary" />
+                </div>
+                WiFi Seçimi
+              </h3>
+
+              <RadioGroup.Root value={selectedWifi} onValueChange={setSelectedWifi} className="space-y-3">
+                {wifiOptions.map((wifi) => (
+                  <div key={wifi.id} className="h-[100px]">
+                    <RadioGroup.Item
+                      value={wifi.id}
+                      className="w-full h-full flex flex-col justify-between p-4 rounded-2xl border-2 border-border hover:border-primary transition-colors cursor-pointer data-[state=checked]:border-primary data-[state=checked]:bg-primary/5 overflow-hidden"
+                    >
+                      <div className="flex items-center justify-between flex-shrink-0">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <div className="w-4 h-4 flex-shrink-0 rounded-full border-2 border-border flex items-center justify-center data-[state=checked]:border-primary">
+                            <RadioGroup.Indicator className="w-2 h-2 rounded-full bg-primary" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{wifi.label}</div>
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0 ml-3">
+                          {wifi.price === 0 ? (
+                            <span className="text-xs text-primary whitespace-nowrap">Ücretsiz</span>
+                          ) : (
+                            <span className="font-medium whitespace-nowrap">+₺{wifi.price}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="ml-6 text-xs text-muted-foreground line-clamp-1">
+                        {wifi.description}
                       </div>
                     </RadioGroup.Item>
                   </div>
@@ -1055,14 +1381,9 @@ export default function Booking() {
                 <div className="space-y-5">
                   {passengerInfos.map((passenger, index) => (
                     <div key={passenger.id} className="rounded-2xl border border-border/70 bg-background/60 p-5">
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <div className="font-medium">{index + 1}. Yolcu</div>
-                          <div className="text-sm text-muted-foreground">{passenger.typeLabel}</div>
-                        </div>
-                        <div className="rounded-full bg-primary/10 px-3 py-1 text-sm text-primary">
-                          %{Math.round(passenger.fareMultiplier * 100)} ücret
-                        </div>
+                      <div className="mb-4">
+                        <div className="font-medium">{index + 1}. Yolcu</div>
+                        <div className="text-sm text-muted-foreground">{passenger.typeLabel}</div>
                       </div>
 
                       <div className="grid md:grid-cols-2 gap-5">
@@ -1103,6 +1424,31 @@ export default function Booking() {
                           className="h-12 rounded-2xl border-2"
                         />
                       </div>
+
+                      <div className="mt-5 grid md:grid-cols-2 gap-5">
+                        <div>
+                          <label className="block mb-3 text-sm text-muted-foreground">Pasaport Numarası (Opsiyonel)</label>
+                          <Input
+                            value={passenger.passportNumber || ''}
+                            onChange={(event) => handlePassengerInfoChange(passenger.id, 'passportNumber', event.target.value)}
+                            placeholder="Pasaport numaranız"
+                            className="h-12 rounded-2xl border-2"
+                          />
+                        </div>
+                        <div>
+                          <label className="block mb-3 text-sm text-muted-foreground">Cinsiyet (Opsiyonel)</label>
+                          <select
+                            value={passenger.gender || ''}
+                            onChange={(event) => handlePassengerInfoChange(passenger.id, 'gender', event.target.value)}
+                            className="h-12 w-full rounded-2xl border-2 border-border bg-background px-4 text-foreground"
+                          >
+                            <option value="">Seçiniz</option>
+                            <option value="M">Erkek</option>
+                            <option value="F">Kadın</option>
+                            <option value="O">Diğer</option>
+                          </select>
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1116,7 +1462,7 @@ export default function Booking() {
                 <div>
                   <label className="block mb-3 text-sm text-muted-foreground flex items-center gap-2">
                     <Mail className="w-4 h-4" />
-                    E-posta Adresi
+                    E-posta adresi (rezervasyon için zorunlu)
                   </label>
                   <Input
                     type="email"
@@ -1132,7 +1478,7 @@ export default function Booking() {
                 <div>
                   <label className="block mb-3 text-sm text-muted-foreground flex items-center gap-2">
                     <Phone className="w-4 h-4" />
-                    Telefon Numarası
+                    Telefon numarası (rezervasyon için zorunlu)
                   </label>
                   <div className="grid grid-cols-[140px_1fr] gap-3">
                     <Select.Root value={phoneCountryCode} onValueChange={setPhoneCountryCode}>
@@ -1164,7 +1510,6 @@ export default function Booking() {
                       name="phone"
                       value={formData.phone}
                       onChange={handleChange}
-                      required
                       inputMode="numeric"
                       placeholder="5XX XXX XX XX"
                       className="h-12 rounded-2xl border-2"
@@ -1204,10 +1549,11 @@ export default function Booking() {
                   <Button
                     type="button"
                     size="lg"
-                    onClick={goToPaymentStep}
+                    disabled={isSavingReservation}
+                    onClick={() => void goToPaymentStep()}
                     className="w-full mt-8 h-14 bg-gradient-to-r from-primary to-accent hover:shadow-xl"
                   >
-                    Ödeme Bilgilerine Geç
+                    {isSavingReservation ? 'Rezervasyon kaydediliyor...' : 'Ödeme Bilgilerine Geç'}
                   </Button>
                 )}
 
@@ -1466,20 +1812,18 @@ export default function Booking() {
                     <span>₺{getBaggagePrice().toLocaleString('tr-TR')}</span>
                   </div>
                 )}
+                {getWifiPrice() > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">WiFi</span>
+                    <span>₺{getWifiPrice().toLocaleString('tr-TR')}</span>
+                  </div>
+                )}
                 {getEntertainmentPrice() > 0 && (
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Eğlence Paketi</span>
                     <span>₺{getEntertainmentPrice().toLocaleString('tr-TR')}</span>
                   </div>
                 )}
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Hizmet Bedeli</span>
-                  <span>₺150</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Vergiler</span>
-                  <span>₺{getTaxPrice().toLocaleString('tr-TR')}</span>
-                </div>
                 <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent my-4"></div>
                 <div className="flex justify-between items-center">
                   <span className="text-lg">Toplam</span>

@@ -6,6 +6,7 @@ import { Button } from './ui/Button';
 import * as Popover from '@radix-ui/react-popover';
 import { toast } from 'sonner';
 import logo from '../../imports/Mavi-Ye_il__afak_U_u_u__1_.png';
+import { authService } from '../services/authService';
 
 interface LayoutProps {
   children: ReactNode;
@@ -16,10 +17,21 @@ export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const { user, logout, isAuthenticated } = useAuth();
 
-  const handleLogout = () => {
-    logout();
-    toast.success('Çıkış yapıldı');
-    navigate('/');
+  const handleLogout = async () => {
+    try {
+      await authService.logout();
+    } catch (error) {
+      // Logout backend hatası olsa bile, frontend'de çıkış yap
+      const errorMessage = error instanceof Error ? error.message : 'Bilinmeyen hata';
+      // Bağlantı sorunu değilse ve hata varsa uyar, ama yine çık
+      if (!errorMessage.toLowerCase().includes('bağlantı') && !errorMessage.toLowerCase().includes('fetch')) {
+        toast.error('Çıkış işlemi tamamlanamadı, ama oturumunuz kapatılıyor.');
+      }
+    } finally {
+      logout();
+      toast.success('Çıkış yapıldı');
+      navigate('/');
+    }
   };
 
   return (

@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, ReactNode } from 'react';
+import { clearAccessToken } from '../services/apiClient';
 
 interface User {
   id?: number | string;
@@ -33,7 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     setUser(null);
     localStorage.removeItem('user');
-    localStorage.removeItem('accessToken');
+    clearAccessToken();
   };
 
   return (

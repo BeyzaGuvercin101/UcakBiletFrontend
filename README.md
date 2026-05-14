@@ -41,6 +41,8 @@ http://localhost:8080
 ```env
 VITE_API_BASE_URL=http://localhost:8080
 VITE_API_TIMEOUT_MS=15000
+STRIPE_SUCCESS_URL=http://localhost:5173/payment/success
+STRIPE_CANCEL_URL=http://localhost:5173/payment/cancel
 ```
 
 `.env.example` dosyasını `.env` olarak kopyalayarak yerel ayarlarınızı tanımlayabilirsiniz:

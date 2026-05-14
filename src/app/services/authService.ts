@@ -30,11 +30,13 @@ export const authService = {
 
   verifyEmail: (email: string, verificationCode: string) => apiRequest<AuthUserDto>('/api/v1/auth/verify-email', {
     method: 'POST',
+      auth: false,
     body: { email, verificationCode },
   }),
 
   resendVerificationEmail: (email: string) => apiRequest<string>('/api/v1/auth/resend-verification-email', {
     method: 'POST',
+      auth: false,
     body: { email },
   }),
 

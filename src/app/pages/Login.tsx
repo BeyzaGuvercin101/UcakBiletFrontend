@@ -36,9 +36,9 @@ const modeCopy: Record<AuthMode, { title: string; subtitle: string; button: stri
     button: 'Kod Gönder',
   },
   'send-code': {
-    title: 'E-posta Kodu Gönder',
+    title: 'Doğrulama Kodunu Yeniden Gönder',
     subtitle: 'E-posta ile giriş veya doğrulama için yeni kod isteyin.',
-    button: 'Kodu Gönder',
+    button: 'Yeniden Kod Gönder',
   },
   'verify-code': {
     title: 'Kodu Gir',
@@ -46,6 +46,18 @@ const modeCopy: Record<AuthMode, { title: string; subtitle: string; button: stri
     button: 'Kodu Onayla',
   },
 };
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return 'Islem sirasinda bir hata olustu.';
+};
+
+const isConnectivityError = (message: string) => (
+  /failed to fetch|networkerror|load failed|fetch failed|econnrefused|enotfound|cors|zaman asimina/i.test(message)
+);
 
 export default function Login() {
   const navigate = useNavigate();
@@ -99,6 +111,10 @@ export default function Login() {
       loginMethod: method,
     });
     navigate(from, { replace: true });
+  };
+
+  const goToLogin = (userEmail: string) => {
+    navigate(`/login?email=${encodeURIComponent(userEmail)}`, { replace: true });
   };
 
   const handleGoogleLogin = () => {
@@ -164,10 +180,9 @@ export default function Login() {
           return;
         }
 
-        const response = await authService.verifyEmail(email, verificationCode);
-        const verifiedUser = getApiData(response);
-        finishLogin(email, 'email', verifiedUser?.id);
+        await authService.verifyEmail(email, verificationCode);
         toast.success('E-posta doğrulandı!');
+        goToLogin(email);
         return;
       }
 
@@ -178,11 +193,17 @@ export default function Login() {
         return;
       }
 
-      const response = await authService.verifyEmail(email, verificationCode);
-      const verifiedUser = getApiData(response);
-      finishLogin(email, 'email', verifiedUser?.id);
+      await authService.verifyEmail(email, verificationCode);
       toast.success('E-posta doğrulandı!');
-    } catch {
+      goToLogin(email);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+
+      if (!isConnectivityError(errorMessage)) {
+        toast.error(errorMessage);
+        return;
+      }
+
       if (mode === 'login') {
         finishLogin(email, 'email');
         toast.success('Backend bağlantısı yok, demo oturumu açıldı.');
@@ -199,8 +220,8 @@ export default function Login() {
         toast.success('Demo modda şifre güncellendi.');
         navigate('/login');
       } else {
-        finishLogin(email, 'email');
         toast.success('Demo modda e-posta doğrulandı.');
+        goToLogin(email);
       }
     } finally {
       setIsSubmitting(false);
@@ -313,11 +334,9 @@ export default function Login() {
                 <label className="block mb-2 text-sm text-muted-foreground">Doğrulama kodu</label>
                 <Input
                   value={verificationCode}
-                  onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="6 haneli kod"
-                  inputMode="numeric"
-                  maxLength={6}
-                  className="h-12 rounded-xl border-2 focus:border-primary tracking-[0.35em] text-center"
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  placeholder="Kod"
+                  className="h-12 rounded-xl border-2 focus:border-primary"
                 />
               </div>
             )}
@@ -350,7 +369,7 @@ export default function Login() {
             {mode !== 'login' && <Link to="/login" className="text-primary hover:underline">Giriş yap</Link>}
             {mode !== 'register' && <Link to="/register" className="text-primary hover:underline">Kaydol</Link>}
             {mode !== 'forgot' && <Link to="/forgot-password" className="text-primary hover:underline">Şifremi unuttum</Link>}
-            {mode !== 'send-code' && <Link to={`/email-code${email ? `?email=${encodeURIComponent(email)}` : ''}`} className="text-primary hover:underline">Kod gönder</Link>}
+            {mode !== 'send-code' && <Link to={`/email-code${email ? `?email=${encodeURIComponent(email)}` : ''}`} className="text-primary hover:underline">Yeniden kod gönder</Link>}
           </div>
         </div>
 

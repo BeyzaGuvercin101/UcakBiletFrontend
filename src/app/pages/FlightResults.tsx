@@ -117,6 +117,17 @@ const generateMockFlights = (from: string, to: string, date = '2026-05-15') => {
 
 const extractCity = (location: string) => location.split(' (')[0];
 
+const getLocationDisplay = (location: string | { city: string; airport: string } | unknown): string => {
+  if (typeof location === 'string') {
+    return location;
+  }
+  if (location && typeof location === 'object' && 'city' in location) {
+    const loc = location as { city: string; airport?: string };
+    return loc.city;
+  }
+  return '';
+};
+
 const formatTime = (dateTime: string) => {
   const date = new Date(dateTime);
   if (Number.isNaN(date.getTime())) return '--:--';
@@ -150,8 +161,8 @@ const calculateDuration = (departureTime: string, arrivalTime: string) => {
 const mapBackendFlight = (flight: FlightDto, index: number) => ({
   id: String(flight.id),
   airline: flight.airline,
-  from: flight.departure,
-  to: flight.arrival,
+  from: getLocationDisplay(flight.departure),
+  to: getLocationDisplay(flight.arrival),
   departTime: formatTime(flight.departureTime),
   arriveTime: formatTime(flight.arrivalTime),
   duration: calculateDuration(flight.departureTime, flight.arrivalTime),
@@ -174,7 +185,6 @@ const toStoredFlight = (flight: DisplayFlight): FlightDto => ({
   departureTime: `${flight.date}T${flight.departTime}:00`,
   arrivalTime: `${flight.date}T${flight.arriveTime}:00`,
   price: flight.price,
-  capacity: 144,
   availableSeats: flight.seats,
   status: 'status' in flight && flight.status ? flight.status : 'SCHEDULED',
 });
@@ -184,14 +194,18 @@ export default function FlightResults() {
   const navigate = useNavigate();
 
   const from = searchParams.get('from') || '';
+  const fromAirport = searchParams.get('fromAirport') || '';
   const to = searchParams.get('to') || '';
+  const toAirport = searchParams.get('toAirport') || '';
   const tripType = searchParams.get('tripType') || 'oneWay';
   const departDate = searchParams.get('departDate') || '';
   const returnDate = searchParams.get('returnDate') || '';
   const outboundFlightId = searchParams.get('outboundFlightId') || '';
   const isReturnSelection = tripType === 'roundTrip' && !!outboundFlightId;
   const activeFrom = isReturnSelection ? to : from;
+  const activeFromAirport = isReturnSelection ? toAirport : fromAirport;
   const activeTo = isReturnSelection ? from : to;
+  const activeToAirport = isReturnSelection ? fromAirport : toAirport;
   const activeDate = isReturnSelection ? returnDate : departDate;
   const adultPassengers = Number(searchParams.get('adultPassengers') || searchParams.get('passengers') || '1');
   const childPassengers = Number(searchParams.get('childPassengers') || '0');
@@ -203,7 +217,9 @@ export default function FlightResults() {
     childPassengers: childPassengers.toString(),
     studentPassengers: studentPassengers.toString(),
     from,
+    fromAirport,
     to,
+    toAirport,
     tripType,
     departDate,
     returnDate,
@@ -211,6 +227,8 @@ export default function FlightResults() {
   const [backendFlights, setBackendFlights] = useState<ReturnType<typeof mapBackendFlight>[] | null>(null);
   const [isLoadingFlights, setIsLoadingFlights] = useState(false);
   const [isSelectionAnimating, setIsSelectionAnimating] = useState(false);
+  const [expandedFlightId, setExpandedFlightId] = useState<string | null>(null);
+  const [selectedClasses, setSelectedClasses] = useState<Record<string, string>>({});
 
   // Format display: if "City (ALL)", show just "City - Tüm Havaalanları"
   const formatLocation = (location: string) => {
@@ -227,23 +245,36 @@ export default function FlightResults() {
     setIsLoadingFlights(true);
     flightService.searchFlights({
       departure: extractCity(activeFrom),
+      departureAirport: activeFromAirport,
       arrival: extractCity(activeTo),
+      arrivalAirport: activeToAirport,
       departureDate: activeDate,
     })
       .then((response) => {
         const flights = response.data || response.payload;
-        setBackendFlights(Array.isArray(flights) && flights.length ? flights.map(mapBackendFlight) : null);
+        const validFlights = Array.isArray(flights) 
+          ? flights
+              .filter(flight => flight.status !== 'CANCELLED')
+              .map(mapBackendFlight)
+          : [];
+        setBackendFlights(validFlights.length > 0 ? validFlights : null);
       })
       .catch(() => setBackendFlights(null))
       .finally(() => setIsLoadingFlights(false));
-  }, [activeFrom, activeTo, activeDate]);
+  }, [activeFrom, activeFromAirport, activeTo, activeToAirport, activeDate]);
 
-  const filteredFlights = ((backendFlights && backendFlights.length > 0) ? backendFlights : generateMockFlights(activeFrom, activeTo, activeDate))
-    .sort((a, b) => a.price - b.price);
+  const filteredFlights = (backendFlights && backendFlights.length > 0) ? backendFlights : [];
 
   const handleSelectFlight = (flight: DisplayFlight) => {
+    // Toggle expand/collapse
+    setExpandedFlightId(expandedFlightId === flight.id ? null : flight.id);
+  };
+
+  const handleConfirmFlight = (flight: DisplayFlight) => {
+    const selectedClass = selectedClasses[flight.id] || 'economy';
     const flightId = flight.id;
     const params = new URLSearchParams(passengerQuery);
+    params.set('flightClass', selectedClass);
     setIsSelectionAnimating(true);
 
     if (tripType === 'roundTrip' && !isReturnSelection) {
@@ -339,33 +370,51 @@ export default function FlightResults() {
           </div>
         )}
 
+        {!isLoadingFlights && filteredFlights.length === 0 && (
+          <div className="mb-6 rounded-2xl border border-destructive/20 bg-destructive/5 p-6 text-center">
+            <Plane className="mx-auto mb-3 h-8 w-8 text-destructive opacity-50" />
+            <div className="text-lg">Sonuç bulunamadı</div>
+            <div className="mt-1 text-sm text-muted-foreground">
+              {formatLocation(activeFrom)} - {formatLocation(activeTo)} rotu için {activeDate} tarihinde uygun uçuş bulunmamaktadır.
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => navigate('/')}
+              className="rounded-xl mt-4"
+            >
+              Aramayı Değiştir
+            </Button>
+          </div>
+        )}
+
         <div className="space-y-4">
           {!isLoadingFlights && filteredFlights.map((flight) => (
-            <div
-              key={flight.id}
-              className="group relative overflow-hidden backdrop-blur-xl bg-card/70 border border-border/50 rounded-2xl hover:shadow-2xl hover:border-primary/50 transition-all duration-300"
-            >
-              {flight.recommended && (
-                <div className="absolute top-0 right-0">
-                  <div className="bg-gradient-to-r from-accent to-primary text-white px-4 py-1 rounded-bl-2xl flex items-center gap-1 text-sm">
-                    <Star className="w-4 h-4" />
-                    Önerilen
-                  </div>
-                </div>
-              )}
-
-              <div className="p-6">
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-                  <div className="flex-1">
-                    <div className="mb-4 flex items-center gap-3">
-                      <AirlineLogo airline={flight.airline} size="md" />
-                      <span className="px-3 py-1 bg-primary/10 text-primary rounded-lg text-sm inline-block">
-                        {flight.airline}
-                      </span>
+            <div key={flight.id} className="space-y-2">
+              <div
+                onClick={() => handleSelectFlight(flight)}
+                className="group relative overflow-hidden backdrop-blur-xl bg-card/70 border border-border/50 rounded-2xl hover:shadow-2xl hover:border-primary/50 transition-all duration-300 cursor-pointer"
+              >
+                {flight.recommended && (
+                  <div className="absolute top-0 right-0">
+                    <div className="bg-gradient-to-r from-accent to-primary text-white px-4 py-1 rounded-bl-2xl flex items-center gap-1 text-sm">
+                      <Star className="w-4 h-4" />
+                      Önerilen
                     </div>
+                  </div>
+                )}
 
-                    <div className="flex items-center gap-8">
-                      <div className="text-center">
+                <div className="p-6">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                    <div className="flex-1">
+                      <div className="mb-4 flex items-center gap-3">
+                        <AirlineLogo airline={flight.airline} size="md" />
+                        <span className="px-3 py-1 bg-primary/10 text-primary rounded-lg text-sm inline-block">
+                          {flight.airline}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-8">
+                        <div className="text-center">
                         <div className="text-3xl mb-1">{flight.departTime}</div>
                         <div className="text-sm text-muted-foreground">{formatLocation(flight.from)}</div>
                       </div>
@@ -402,7 +451,7 @@ export default function FlightResults() {
                   </div>
 
                   <div className="lg:border-l lg:border-border/50 lg:pl-6 flex flex-col items-center lg:items-end gap-4">
-                    <div className="text-center lg:text-right">
+                    <div className="text-center lg:text-right w-full">
                       <div className="text-sm text-muted-foreground mb-1">Kişi başı</div>
                       <div className="text-4xl bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent mb-1">
                         ₺{flight.price.toLocaleString('tr-TR')}
@@ -413,7 +462,6 @@ export default function FlightResults() {
                     </div>
 
                     <Button
-                      onClick={() => handleSelectFlight(flight)}
                       disabled={isSelectionAnimating}
                       className="w-full lg:w-auto px-8 rounded-xl bg-gradient-to-r from-primary to-accent hover:shadow-lg hover:scale-105 transition-all flex items-center gap-2"
                     >
@@ -423,6 +471,62 @@ export default function FlightResults() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Expanded Details */}
+            {expandedFlightId === flight.id && (
+              <div className="backdrop-blur-xl bg-card/70 border border-border/50 rounded-2xl p-6 space-y-4 animate-in fade-in duration-200">
+                <h3 className="font-semibold text-lg mb-4">Uçuş Sınıfı Seçin</h3>
+                
+                <div className="space-y-3">
+                  {[
+                    { id: 'economy', label: 'Economy Class', surcharge: 0, desc: 'Standart konfor' },
+                    { id: 'business', label: 'Business Class', surcharge: 2625, desc: 'Premium deneyim' },
+                    { id: 'first', label: 'First Class', surcharge: 5250, desc: 'Lüks seyahat' }
+                  ].map((classOption) => (
+                    <div
+                      key={classOption.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedClasses(prev => ({ ...prev, [flight.id]: classOption.id }));
+                      }}
+                      className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                        selectedClasses[flight.id] === classOption.id
+                          ? 'border-primary bg-primary/5'
+                          : 'border-border/30 hover:border-border/60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="font-medium">{classOption.label}</div>
+                          <div className="text-sm text-muted-foreground">{classOption.desc}</div>
+                        </div>
+                        <div className="text-right">
+                          {classOption.surcharge === 0 ? (
+                            <span className="text-xs text-primary">Standart</span>
+                          ) : (
+                            <span className="font-semibold text-primary">
+                              +₺{classOption.surcharge.toLocaleString('tr-TR')}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <Button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleConfirmFlight(flight);
+                  }}
+                  disabled={isSelectionAnimating}
+                  className="w-full bg-gradient-to-r from-primary to-accent"
+                >
+                  Seç
+                </Button>
+              </div>
+            )}
             </div>
           ))}
         </div>

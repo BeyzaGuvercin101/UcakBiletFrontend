@@ -1,34 +1,37 @@
 import { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
-import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { Plane, Calendar, User, Mail, Ticket, AlertTriangle, Clock } from 'lucide-react';
 import { toast } from 'sonner';
-import { useAuth } from '../context/AuthContext';
 import { getApiData } from '../services/apiClient';
-import { ticketService, type TicketDto } from '../services/ticketService';
+import { flightService, type FlightDto } from '../services/flightService';
+import { reservationService, type ReservationDto } from '../services/reservationService';
+import { ticketService } from '../services/ticketService';
 import QRCode from 'qrcode';
 
 interface TicketType {
   id: string;
   airline: string;
-  from: string;
-  to: string;
-  departTime: string;
-  arriveTime: string;
-  date: string;
-  price: number;
+  flightNum?: string;
+  from?: string;
+  to?: string;
+  departTime?: string;
+  arriveTime?: string;
+  date?: string;
+  price?: number;
   passenger: string;
-  email: string;
+  email?: string;
   pnr: string;
   purchaseDate: string;
+  reservationId?: string;
   phone?: string;
   identityType?: string;
   identityNumber?: string;
   class?: string;
   seat?: string;
   baggage?: string;
+  wifi?: string;
   entertainment?: string;
   checkedIn?: boolean;
   checkInTime?: string;
@@ -48,57 +51,146 @@ const formatBackendDate = (dateTime?: string) => {
   return date.toISOString().slice(0, 10);
 };
 
-const mapBackendTicket = (ticket: TicketDto): TicketType | null => {
-  const flight = ticket.flight;
-  if (!flight) return null;
+interface MyTicketApiDto {
+  id: number | string;
+  flightNum?: string;
+  passengerFullName?: string;
+  reservationId?: number | string;
+  seatNumber?: string;
+  ticketNumber?: string;
+  createTime?: string | null;
+}
+
+const getLocationDisplay = (location: string | { city?: string; airport?: string } | undefined) => {
+  if (!location) return '';
+  if (typeof location === 'string') return location;
+  return location.city || '';
+};
+
+const formatFlightClassLabel = (flightClass?: string) => {
+  const labels: Record<string, string> = {
+    ECONOMY: 'Economy',
+    BUSINESS: 'Business',
+    FIRST_CLASS: 'First Class',
+  };
+
+  return flightClass ? labels[flightClass] || flightClass : '';
+};
+
+const formatServiceOptionLabel = (value?: string) => {
+  const labels: Record<string, string> = {
+    CABIN_ONLY: 'Sadece kabin bagajı',
+    KG_20: '20 kg bagaj',
+    KG_30: '30 kg bagaj',
+    KG_40: '40 kg bagaj',
+    NONE: 'Yok',
+    BASIC: 'Temel paket',
+    STANDARD: 'Standart paket',
+    PREMIUM: 'Premium paket',
+  };
+
+  return value ? labels[value] || value : '';
+};
+
+const mapBackendTicket = (
+  ticket: MyTicketApiDto,
+  reservation?: ReservationDto,
+  flight?: FlightDto,
+): TicketType => {
+  const departureTime = flight?.departureTime;
+  const arrivalTime = flight?.arrivalTime;
+  const flightDate = departureTime ? formatBackendDate(departureTime) : reservation?.reservationDate ? formatBackendDate(reservation.reservationDate) : '';
 
   return {
     id: String(ticket.id),
-    airline: flight.airline,
-    from: flight.departure,
-    to: flight.arrival,
-    departTime: formatBackendTime(flight.departureTime),
-    arriveTime: formatBackendTime(flight.arrivalTime),
-    date: formatBackendDate(flight.departureTime),
-    price: Number(ticket.price || flight.price || 0),
-    passenger: String(ticket.passengerName || ticket.passenger || 'Yolcu'),
-    email: String(ticket.passengerEmail || ticket.email || ''),
-    phone: ticket.passengerPhone ? String(ticket.passengerPhone) : undefined,
-    pnr: String(ticket.pnr || ticket.id),
-    seat: ticket.seatNo ? String(ticket.seatNo) : undefined,
-    purchaseDate: String(ticket.createTime || new Date().toISOString()),
+    airline: flight?.airline || (ticket.flightNum ? `Uçuş ${ticket.flightNum}` : 'Uçuş'),
+    flightNum: ticket.flightNum ? String(ticket.flightNum) : undefined,
+    from: getLocationDisplay(flight?.departure),
+    to: getLocationDisplay(flight?.arrival),
+    departTime: departureTime ? formatBackendTime(departureTime) : undefined,
+    arriveTime: arrivalTime ? formatBackendTime(arrivalTime) : undefined,
+    date: flightDate || undefined,
+    price: Number(reservation?.totalPrice || 0),
+    passenger: String(ticket.passengerFullName || 'Yolcu'),
+    email: reservation?.userEmail ? String(reservation.userEmail) : undefined,
+    pnr: String(ticket.ticketNumber || ticket.id),
+    reservationId: ticket.reservationId ? String(ticket.reservationId) : undefined,
+    seat: ticket.seatNumber ? String(ticket.seatNumber) : undefined,
+    class: formatFlightClassLabel(reservation?.flightClass),
+    baggage: formatServiceOptionLabel(reservation?.baggageOption),
+    wifi: formatServiceOptionLabel(reservation?.wifiOption),
+    entertainment: formatServiceOptionLabel(reservation?.entertainmentOption),
+    purchaseDate: ticket.createTime ? String(ticket.createTime) : new Date().toISOString(),
   };
 };
 
 export default function MyTickets() {
-  const { user } = useAuth();
   const [tickets, setTickets] = useState<TicketType[]>([]);
   const [refundingTicket, setRefundingTicket] = useState<TicketType | null>(null);
   const [checkingInTicket, setCheckingInTicket] = useState<TicketType | null>(null);
-  const [showBoardingPass, setShowBoardingPass] = useState<TicketType | null>(null);  const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
+  const [showBoardingPass, setShowBoardingPass] = useState<TicketType | null>(null);
+  const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   useEffect(() => {
+    let cancelled = false;
     const storedTickets = JSON.parse(localStorage.getItem('tickets') || '[]');
     setTickets(storedTickets);
 
-    if (!user?.id) return;
-
-    ticketService.getTicketsByUser(user.id)
-      .then((response) => {
+    const loadTickets = async () => {
+      try {
+        const response = await ticketService.getMyTickets();
         const backendTickets = getApiData(response);
         if (!Array.isArray(backendTickets)) return;
 
-        const mappedTickets = backendTickets
-          .map((ticket) => mapBackendTicket(ticket))
-          .filter((ticket): ticket is TicketType => !!ticket);
+        const mappedTickets = await Promise.all(
+          backendTickets.map(async (rawTicket) => {
+            const ticket = rawTicket as MyTicketApiDto;
+            let reservation: ReservationDto | undefined;
+            let flight: FlightDto | undefined;
 
-        if (mappedTickets.length) {
+            if (ticket.reservationId !== undefined && ticket.reservationId !== null && ticket.reservationId !== '') {
+              try {
+                const reservationResponse = await reservationService.getReservationById(ticket.reservationId);
+                const reservationData = getApiData(reservationResponse);
+                if (reservationData && typeof reservationData === 'object') {
+                  reservation = reservationData as ReservationDto;
+                }
+              } catch {
+                reservation = undefined;
+              }
+            }
+
+            if (reservation?.flightId !== undefined && reservation.flightId !== null && reservation.flightId !== '') {
+              try {
+                const flightResponse = await flightService.getFlightById(reservation.flightId);
+                const flightData = getApiData(flightResponse);
+                if (flightData && typeof flightData === 'object') {
+                  flight = flightData as FlightDto;
+                }
+              } catch {
+                flight = undefined;
+              }
+            }
+
+            return mapBackendTicket(ticket, reservation, flight);
+          }),
+        );
+
+        if (!cancelled) {
           setTickets(mappedTickets);
         }
-      })
-      .catch(() => {
-        setTickets(storedTickets);
-      });
-  }, [user?.id]);
+      } catch {
+        if (!cancelled) {
+          setTickets(storedTickets);
+        }
+      }
+    };
+
+    void loadTickets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const formatLocation = (location: string) => {
     if (location.includes('(ALL)')) {
@@ -108,6 +200,10 @@ export default function MyTickets() {
   };
 
   const getTimeUntilFlight = (ticket: TicketType) => {
+    if (!ticket.date || !ticket.departTime) {
+      return ticket.flightNum ? 'Uçuş saati bekleniyor' : 'Tarih bekleniyor';
+    }
+
     const flightDateTime = new Date(`${ticket.date}T${ticket.departTime}:00`);
 
     if (Number.isNaN(flightDateTime.getTime())) {
@@ -138,6 +234,7 @@ export default function MyTickets() {
 
   const canCheckIn = (ticket: TicketType) => {
     if (ticket.checkedIn) return false;
+    if (!ticket.date || !ticket.departTime) return false;
 
     const flightDateTime = new Date(`${ticket.date}T${ticket.departTime}:00`);
     if (Number.isNaN(flightDateTime.getTime())) return false;
@@ -178,11 +275,11 @@ export default function MyTickets() {
     try {
       const qrData = JSON.stringify({
         pnr: ticket.pnr,
-        passenger: ticket.passengerName,
-        flight: `${ticket.from} - ${ticket.to}`,
-        date: ticket.departDate,
-        time: ticket.departTime,
-        seat: ticket.seatNumber || 'Otomatik',
+        passenger: ticket.passenger,
+        flight: ticket.flightNum || ticket.airline,
+        date: ticket.date || 'Bilgi yok',
+        time: ticket.departTime || 'Bilgi yok',
+        seat: ticket.seat || 'Otomatik',
         airline: ticket.airline
       });
 
@@ -257,19 +354,19 @@ export default function MyTickets() {
               <div key={ticket.id} className="backdrop-blur-xl bg-card/70 border border-border/50 rounded-3xl overflow-hidden hover:shadow-2xl transition-all">
                 <div className="bg-gradient-to-r from-primary/5 to-accent/5 px-6 py-4 border-b border-border/50">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-gradient-to-br from-primary to-accent rounded-2xl flex items-center justify-center">
-                        <Plane className="w-6 h-6 text-white" />
-                      </div>
-                      <div>
-                        <div className="text-sm text-muted-foreground">PNR Kodu</div>
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 bg-gradient-to-br from-primary to-accent rounded-2xl flex items-center justify-center">
+                          <Plane className="w-6 h-6 text-white" />
+                        </div>
+                        <div>
+                        <div className="text-sm text-muted-foreground">Bilet Numarası</div>
                         <div className="text-2xl bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
                           {ticket.pnr}
                         </div>
                       </div>
                     </div>
                     <div className="px-4 py-2 bg-card border border-border/50 rounded-xl">
-                      {ticket.airline}
+                      {ticket.flightNum || ticket.airline}
                     </div>
                   </div>
                 </div>
@@ -280,8 +377,8 @@ export default function MyTickets() {
                     <div className="flex items-center gap-8 mb-6">
                       <div className="flex-1">
                         <div className="text-center">
-                          <div className="text-3xl mb-1">{ticket.departTime}</div>
-                          <div className="text-sm text-muted-foreground">{formatLocation(ticket.from)}</div>
+                          <div className="text-3xl mb-1">{ticket.departTime || '--:--'}</div>
+                          <div className="text-sm text-muted-foreground">{formatLocation(ticket.from || 'Kalkış bilgisi yok')}</div>
                         </div>
                       </div>
                       <div className="flex-1 flex flex-col items-center">
@@ -295,8 +392,8 @@ export default function MyTickets() {
                       </div>
                       <div className="flex-1">
                         <div className="text-center">
-                          <div className="text-3xl mb-1">{ticket.arriveTime}</div>
-                          <div className="text-sm text-muted-foreground">{formatLocation(ticket.to)}</div>
+                          <div className="text-3xl mb-1">{ticket.arriveTime || '--:--'}</div>
+                          <div className="text-sm text-muted-foreground">{formatLocation(ticket.to || 'Varış bilgisi yok')}</div>
                         </div>
                       </div>
                     </div>
@@ -307,7 +404,7 @@ export default function MyTickets() {
                           <Calendar className="w-3 h-3" />
                           Tarih
                         </div>
-                        <div>{ticket.date}</div>
+                        <div>{ticket.date || 'Bilgi yok'}</div>
                       </div>
 
                       <div>
@@ -344,15 +441,6 @@ export default function MyTickets() {
                         </div>
                       )}
 
-                      {ticket.seat && (
-                        <div>
-                          <div className="text-xs text-muted-foreground mb-1">
-                            Koltuk
-                          </div>
-                          <div className="font-medium">{ticket.seat}</div>
-                        </div>
-                      )}
-
                       {ticket.baggage && (
                         <div>
                           <div className="text-xs text-muted-foreground mb-1">
@@ -373,12 +461,12 @@ export default function MyTickets() {
                     </div>
 
                     <div className="mt-4 grid md:grid-cols-2 gap-3">
-                      <div className="p-3 bg-muted/30 rounded-xl">
-                        <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
-                          <Mail className="w-3 h-3" />
-                          E-posta
-                        </div>
-                        <div className="text-sm truncate">{ticket.email}</div>
+                        <div className="p-3 bg-muted/30 rounded-xl">
+                          <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                            <Mail className="w-3 h-3" />
+                            E-posta
+                          </div>
+                        <div className="text-sm truncate">{ticket.email || 'Bilgi yok'}</div>
                       </div>
                       {ticket.phone && (
                         <div className="p-3 bg-muted/30 rounded-xl">
@@ -394,7 +482,7 @@ export default function MyTickets() {
                       <div>
                         <div className="text-sm text-muted-foreground mb-1">Ödenen Tutar</div>
                         <div className="text-3xl bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-                          ₺{ticket.price.toLocaleString('tr-TR')}
+                          ₺{Number(ticket.price || 0).toLocaleString('tr-TR')}
                         </div>
                       </div>
 
@@ -625,10 +713,6 @@ export default function MyTickets() {
                       <div>
                         <div className="text-sm text-muted-foreground mb-1">Yolcu Adı</div>
                         <div className="text-lg font-bold">{showBoardingPass.passenger}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm text-muted-foreground mb-1">Koltuk No</div>
-                        <div className="text-lg font-bold">{showBoardingPass.seat || 'Otomatik'}</div>
                       </div>
                     </div>
                   </div>

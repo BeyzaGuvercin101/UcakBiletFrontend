@@ -90,6 +90,30 @@ export const normalizeApiEnvelope = <T>(body: unknown, fallbackStatus?: number):
 
 export const getApiData = <T>(response: ApiEnvelope<T>) => response.data ?? response.payload;
 
+const extractNestedErrorMessage = (body: unknown): string | undefined => {
+  if (!body || typeof body !== 'object') return undefined;
+
+  const record = body as Record<string, unknown>;
+
+  if (typeof record.errorMessage === 'string' && record.errorMessage.trim()) {
+    return record.errorMessage;
+  }
+
+  if (typeof record.message === 'string' && record.message.trim()) {
+    return record.message;
+  }
+
+  const exception = record.exception;
+  if (exception && typeof exception === 'object') {
+    const exceptionRecord = exception as Record<string, unknown>;
+    if (typeof exceptionRecord.message === 'string' && exceptionRecord.message.trim()) {
+      return exceptionRecord.message;
+    }
+  }
+
+  return undefined;
+};
+
 export async function readApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
   const contentType = response.headers.get('content-type') || '';
   const rawBody = response.status === 204
@@ -99,9 +123,16 @@ export async function readApiResponse<T>(response: Response): Promise<ApiEnvelop
       : await response.text();
 
   const responseBody = normalizeApiEnvelope<T>(rawBody, response.status);
+  const extractedErrorMessage = extractNestedErrorMessage(rawBody);
 
-  if (!response.ok || (responseBody.status && responseBody.status >= 400)) {
+  const envelopeStatus =
+    typeof responseBody.status === 'number' && Number.isFinite(responseBody.status)
+      ? responseBody.status
+      : undefined;
+
+  if (!response.ok || (envelopeStatus !== undefined && envelopeStatus >= 400)) {
     throw new Error(
+      extractedErrorMessage ||
       responseBody.errorMessage ||
       responseBody.message ||
       `API istegi basarisiz: ${response.status}`,
@@ -136,6 +167,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
   try {
     const response = await fetch(buildApiUrl(path, query), {
       method,
+      credentials: 'include',
       headers: requestHeaders,
       body: body === undefined
         ? undefined

@@ -1,25 +1,38 @@
 import { apiRequest } from './apiClient';
 
-export interface CheckoutPaymentResult {
-  checkoutUrl?: string;
-  paymentUrl?: string;
-  sessionUrl?: string;
-  url?: string;
+/** POST /api/payments/checkout/{reservationId} yanıtı */
+export interface CheckoutSessionDto {
+  paymentId?: number;
+  reservationId?: number;
   sessionId?: string;
+  sessionUrl?: string;
+  status?: string;
 }
 
-export type CheckoutPaymentResponse = string | CheckoutPaymentResult;
+export type CheckoutPaymentResponse = string | CheckoutSessionDto;
 
 export const paymentService = {
-  checkoutPayment: (reservationId: number | string) => apiRequest<CheckoutPaymentResponse>(`/api/payments/checkout/${reservationId}`, {
-    method: 'POST',
-  }),
+  /** Boş gövde, Authorization: Bearer (apiRequest varsayılanı auth: true) */
+  checkoutPayment: (reservationId: number | string) =>
+    apiRequest<CheckoutPaymentResponse>(`/api/payments/checkout/${reservationId}`, {
+      method: 'POST',
+      auth: true,
+    }),
 
-  paymentSuccess: (sessionId: string) => {
-    return apiRequest<string>('/api/payments/success', {
+  paymentSuccess: (sessionId: string) =>
+    apiRequest<{
+      amount?: number;
+      flightNum?: string;
+      id?: number;
+      reservationId?: number;
+      status?: string;
+      passengerFullName?: string;
+      [key: string]: unknown;
+    }>('/api/payments/success', {
+      method: 'GET',
+      auth: true,
       query: { session_id: sessionId },
-    });
-  },
+    }),
 
   getPaymentByReservation: (reservationId: number | string) => apiRequest<string>(`/api/payments/reservation/${reservationId}`),
 

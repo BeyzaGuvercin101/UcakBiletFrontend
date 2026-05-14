@@ -22,6 +22,8 @@ export const ticketService = {
 
   getTicketsByUser: (userId: number | string) => apiRequest<TicketDto[] | string>(`/api/tickets/getByUser/${userId}`),
 
+  getMyTickets: () => apiRequest<TicketDto[] | string>('/api/tickets/my'),
+
   getTicketByReservation: (reservationId: number | string) => apiRequest<TicketDto | string>(`/api/tickets/getByReservation/${reservationId}`),
 
   getAllTickets: () => apiRequest<TicketDto[] | string>('/api/tickets/getAll'),

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import Layout from '../components/Layout';
 import { Button } from '../components/ui/Button';
@@ -7,6 +7,7 @@ import { ImageWithFallback } from '../components/figma/ImageWithFallback';
 import * as Select from '@radix-ui/react-select';
 import { CalendarDays, MapPin, Users, ChevronDown, Check, Search, TrendingUp, Plane, Loader2, History, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
+import { flightService } from '../services/flightService';
 
 const airports = [
   // Türkiye
@@ -155,24 +156,27 @@ const airports = [
   { country: 'Bolivya', city: 'Santa Cruz', airport: 'Viru Viru International Airport', code: 'VVI' },
 ];
 
-// Group airports by city and add "All" option for cities with multiple airports
-const locations = airports.reduce((acc: Array<{ country: string; city: string; airport: string; code: string; isAll?: boolean }>, airport) => {
-  const cityAirports = airports.filter(a => a.city === airport.city);
-  const hasAll = acc.some(loc => loc.city === airport.city && loc.isAll);
+const getLocationsFromAirports = (airportsList: typeof airports) => {
+  return airportsList.reduce((acc: Array<{ country: string; city: string; airport: string; code: string; isAll?: boolean }>, airport) => {
+    const cityAirports = airportsList.filter(a => a.city === airport.city);
+    const hasAll = acc.some(loc => loc.city === airport.city && loc.isAll);
 
-  if (cityAirports.length > 1 && !hasAll) {
-    acc.push({
-      country: airport.country,
-      city: airport.city,
-      airport: 'Tüm Havaalanları',
-      code: 'ALL',
-      isAll: true
-    });
-  }
+    if (cityAirports.length > 1 && !hasAll) {
+      acc.push({
+        country: airport.country,
+        city: airport.city,
+        airport: 'Tüm Havaalanları',
+        code: 'ALL',
+        isAll: true
+      });
+    }
 
-  acc.push(airport);
-  return acc;
-}, []);
+    acc.push(airport);
+    return acc;
+  }, []);
+};
+
+const defaultLocations = getLocationsFromAirports(airports);
 
 const popularDestinations = [
   {
@@ -254,6 +258,8 @@ export default function Home() {
   const [tripType, setTripType] = useState<'oneWay' | 'roundTrip'>('oneWay');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [fromOpen, setFromOpen] = useState(false);
+  const [toOpen, setToOpen] = useState(false);
   const [departDate, setDepartDate] = useState('');
   const [returnDate, setReturnDate] = useState('');
   const [adultPassengers, setAdultPassengers] = useState('1');
@@ -262,6 +268,114 @@ export default function Home() {
   const [isSearching, setIsSearching] = useState(false);
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [recentSearches, setRecentSearches] = useState<RecentSearch[]>(() => getRecentSearches());
+  const [locations, setLocations] = useState(defaultLocations);
+  const [isLoadingAirports, setIsLoadingAirports] = useState(false);
+
+  // Load airports when dropdown opens
+  useEffect(() => {
+    if (fromOpen || toOpen) {
+      setIsLoadingAirports(true);
+      flightService.getAirports()
+        .then((response) => {
+          const airportList = response.data || response.payload;
+          if (Array.isArray(airportList)) {
+            // Build locations from flat airport list
+            const locMap = new Map<string, Set<string>>();
+            airportList.forEach((item) => {
+              if (!locMap.has(item.city)) {
+                locMap.set(item.city, new Set());
+              }
+              locMap.get(item.city)!.add(item.airport);
+            });
+
+            const processedLocations: Array<{
+              country: string;
+              city: string;
+              airport: string;
+              code: string;
+              isAll?: boolean;
+            }> = [];
+
+            locMap.forEach((airports, city) => {
+              if (airports.size > 1) {
+                processedLocations.push({
+                  country: '',
+                  city,
+                  airport: 'Tüm Havaalanları',
+                  code: 'ALL',
+                  isAll: true,
+                });
+              }
+              airports.forEach((airport) => {
+                processedLocations.push({
+                  country: '',
+                  city,
+                  airport,
+                  code: '',
+                });
+              });
+            });
+
+            setLocations(processedLocations);
+          }
+        })
+        .catch(() => {
+          setLocations(defaultLocations);
+        })
+        .finally(() => setIsLoadingAirports(false));
+    }
+  }, [fromOpen, toOpen]);
+
+  // Helper functions to extract values from internal format
+  const getFromDisplay = () => {
+    if (!from) return '';
+    const [city, , code] = from.split('|');
+    return code ? `${city} (${code})` : city;
+  };
+
+  const getToDisplay = () => {
+    if (!to) return '';
+    const [city, , code] = to.split('|');
+    return code ? `${city} (${code})` : city;
+  };
+
+  const getFromAirport = () => {
+    if (!from) return '';
+    const parts = from.split('|');
+    return parts[1] || '';
+  };
+
+  const getToAirport = () => {
+    if (!to) return '';
+    const parts = to.split('|');
+    return parts[1] || '';
+  };
+
+  const handleRecentSearchClick = (search: RecentSearch) => {
+    const getAirportCode = (location: string) => {
+      const parts = location.split('|');
+      return parts[1] || '';
+    };
+
+    const params = new URLSearchParams({
+      tripType: search.tripType,
+      from: search.from,
+      fromAirport: getAirportCode(search.from),
+      to: search.to,
+      toAirport: getAirportCode(search.to),
+      departDate: search.departDate,
+      returnDate: search.returnDate,
+      passengers: (Number(search.adultPassengers || 0) + Number(search.childPassengers || 0) + Number(search.studentPassengers || 0)).toString(),
+      adultPassengers: search.adultPassengers,
+      childPassengers: search.childPassengers,
+      studentPassengers: search.studentPassengers,
+    });
+
+    setIsSearching(true);
+    window.setTimeout(() => {
+      navigate(`/flights?${params.toString()}`);
+    }, 700);
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -298,8 +412,10 @@ export default function Home() {
 
     const params = new URLSearchParams({
       tripType,
-      from,
-      to,
+      from: getFromDisplay(),
+      fromAirport: getFromAirport(),
+      to: getToDisplay(),
+      toAirport: getToAirport(),
       departDate,
       returnDate: tripType === 'roundTrip' ? returnDate : '',
       passengers: totalPassengers.toString(),
@@ -374,16 +490,7 @@ export default function Home() {
                     <button
                       key={`${search.from}-${search.to}-${search.departDate}-${index}`}
                       type="button"
-                      onClick={() => {
-                        setTripType(search.tripType);
-                        setFrom(search.from);
-                        setTo(search.to);
-                        setDepartDate(search.departDate);
-                        setReturnDate(search.returnDate);
-                        setAdultPassengers(search.adultPassengers);
-                        setChildPassengers(search.childPassengers);
-                        setStudentPassengers(search.studentPassengers);
-                      }}
+                      onClick={() => handleRecentSearchClick(search)}
                       className="flex items-center justify-between gap-3 rounded-xl bg-background/80 px-4 py-3 text-left hover:bg-background hover:shadow-md transition-all"
                     >
                       <span>
@@ -439,9 +546,15 @@ export default function Home() {
                   <MapPin className="w-4 h-4" />
                   Nereden
                 </label>
-                <Select.Root value={from} onValueChange={setFrom} required>
+                <Select.Root 
+                  open={fromOpen}
+                  onOpenChange={setFromOpen}
+                  value={from} 
+                  onValueChange={setFrom} 
+                  required
+                >
                   <Select.Trigger className="w-full px-5 py-4 rounded-2xl bg-input-background border-2 border-border flex items-center justify-between hover:border-primary transition-colors">
-                    <Select.Value placeholder="Kalkış noktası seçin" />
+                    <span className="flex-1 text-left">{getFromDisplay() || 'Kalkış noktası seçin'}</span>
                     <ChevronDown className="w-5 h-5 text-muted-foreground" />
                   </Select.Trigger>
                   <Select.Portal>
@@ -455,7 +568,7 @@ export default function Home() {
                         {locations.map((location, index) => (
                           <Select.Item
                             key={`from-${index}`}
-                            value={`${location.city} (${location.code})`}
+                            value={`${location.city}|${location.airport}|${location.code}`}
                             className={`px-4 py-3 rounded-xl cursor-pointer hover:bg-primary/10 outline-none flex items-center justify-between transition-colors ${
                               location.isAll ? 'bg-primary/5' : ''
                             }`}
@@ -467,7 +580,7 @@ export default function Home() {
                                   {location.isAll && <span className="ml-2 text-xs px-2 py-0.5 bg-primary/20 text-primary rounded">Tümü</span>}
                                 </span>
                                 <span className="text-xs text-muted-foreground text-left">
-                                  {location.isAll ? 'Tüm Havaalanları' : `${location.airport} (${location.code})`}
+                                  {location.isAll ? 'Tüm Havaalanları' : location.airport}
                                 </span>
                               </div>
                             </Select.ItemText>
@@ -487,9 +600,15 @@ export default function Home() {
                   <MapPin className="w-4 h-4" />
                   Nereye
                 </label>
-                <Select.Root value={to} onValueChange={setTo} required>
+                <Select.Root 
+                  open={toOpen}
+                  onOpenChange={setToOpen}
+                  value={to} 
+                  onValueChange={setTo} 
+                  required
+                >
                   <Select.Trigger className="w-full px-5 py-4 rounded-2xl bg-input-background border-2 border-border flex items-center justify-between hover:border-primary transition-colors">
-                    <Select.Value placeholder="Varış noktası seçin" />
+                    <span className="flex-1 text-left">{getToDisplay() || 'Varış noktası seçin'}</span>
                     <ChevronDown className="w-5 h-5 text-muted-foreground" />
                   </Select.Trigger>
                   <Select.Portal>
@@ -503,7 +622,7 @@ export default function Home() {
                         {locations.map((location, index) => (
                           <Select.Item
                             key={`to-${index}`}
-                            value={`${location.city} (${location.code})`}
+                            value={`${location.city}|${location.airport}|${location.code}`}
                             className={`px-4 py-3 rounded-xl cursor-pointer hover:bg-primary/10 outline-none flex items-center justify-between transition-colors ${
                               location.isAll ? 'bg-primary/5' : ''
                             }`}
@@ -515,7 +634,7 @@ export default function Home() {
                                   {location.isAll && <span className="ml-2 text-xs px-2 py-0.5 bg-primary/20 text-primary rounded">Tümü</span>}
                                 </span>
                                 <span className="text-xs text-muted-foreground">
-                                  {location.isAll ? 'Tüm Havaalanları' : `${location.airport} (${location.code})`}
+                                  {location.isAll ? 'Tüm Havaalanları' : location.airport}
                                 </span>
                               </div>
                             </Select.ItemText>
